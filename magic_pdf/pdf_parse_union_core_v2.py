@@ -21,8 +21,11 @@ from magic_pdf.libs.config_reader import get_local_layoutreader_model_dir, get_l
 from magic_pdf.libs.convert_utils import dict_to_list
 from magic_pdf.libs.hash_utils import compute_md5
 from magic_pdf.libs.pdf_image_tools import cut_image_to_pil_image
+from magic_pdf.libs.performance_stats import measure_time, PerformanceStats
 from magic_pdf.model.magic_model import MagicModel
 from magic_pdf.post_proc.llm_aided import llm_aided_formula, llm_aided_text, llm_aided_title
+
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import torchtext
@@ -215,7 +218,7 @@ def calculate_contrast(img, img_mode) -> float:
     # logger.info(f"contrast: {contrast}")
     return round(contrast, 2)
 
-
+# @measure_time
 def txt_spans_extract_v2(pdf_page, spans, all_bboxes, all_discarded_blocks, lang):
     # cid用0xfffd表示，连字符拆开
     # text_blocks_raw = pdf_page.get_text('rawdict', flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_MEDIABOX_CLIP)['blocks']
@@ -338,24 +341,7 @@ def txt_spans_extract_v2(pdf_page, spans, all_bboxes, all_discarded_blocks, lang
 
 def model_init(model_name: str):
     from transformers import LayoutLMv3ForTokenClassification
-    device = get_device()
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-        if torch.cuda.is_bf16_supported():
-            supports_bfloat16 = True
-        else:
-            supports_bfloat16 = False
-    elif str(device).startswith("npu"):
-        import torch_npu
-        if torch_npu.npu.is_available():
-            device = torch.device('npu')
-            supports_bfloat16 = False
-        else:
-            device = torch.device('cpu')
-            supports_bfloat16 = False
-    else:
-        device = torch.device('cpu')
-        supports_bfloat16 = False
+    device = torch.device(get_device())
 
     if model_name == 'layoutreader':
         # 检测modelscope的缓存目录是否存在
@@ -371,9 +357,6 @@ def model_init(model_name: str):
             model = LayoutLMv3ForTokenClassification.from_pretrained(
                 'hantian/layoutreader'
             )
-        # 检查设备是否支持 bfloat16
-        if supports_bfloat16:
-            model.bfloat16()
         model.to(device).eval()
     else:
         logger.error('model name not allow')
@@ -509,7 +492,7 @@ def insert_lines_into_block(block_bbox, line_height, page_w, page_h):
     else:
         return [[x0, y0, x1, y1]]
 
-
+# @measure_time
 def sort_lines_by_model(fix_blocks, page_w, page_h, line_height):
     page_line_list = []
 
@@ -943,7 +926,6 @@ def pdf_parse_union(
     magic_model = MagicModel(model_list, dataset)
 
     """根据输入的起始范围解析pdf"""
-    # end_page_id = end_page_id if end_page_id else len(pdf_docs) - 1
     end_page_id = (
         end_page_id
         if end_page_id is not None and end_page_id >= 0
@@ -979,6 +961,8 @@ def pdf_parse_union(
                 [], [], page_id, page_w, page_h, [], [], [], [], [], True, 'skip page'
             )
         pdf_info_dict[f'page_{page_id}'] = page_info
+
+    # PerformanceStats.print_stats()
 
     """分段"""
     para_split(pdf_info_dict)
